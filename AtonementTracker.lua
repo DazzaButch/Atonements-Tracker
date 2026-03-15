@@ -7,7 +7,7 @@ AtonementTrackerDB = AtonementTrackerDB or {
     locked = false,
     alpha = 1.0,
     fontSize = 22,
-    scanInterval = 0.2, -- Default update rate
+    scanInterval = 0.2,
 }
 
 --------------------------------------------------
@@ -106,7 +106,6 @@ frame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == addonName then
         RefreshUI()
     else
-        -- Performance throttled scan
         local now = GetTime()
         if (now - lastScan) >= (AtonementTrackerDB.scanInterval or 0.2) then
             ScanAtonements()
@@ -117,14 +116,11 @@ end)
 
 frame:SetScript("OnUpdate", function()
     if atonementCount == 0 then return end
-    
     local now = GetTime()
     local remaining = shortestExpiration - now
-    
     if remaining > 0 then
         timerText:SetText(string.format("%.0f", remaining))
         countText:SetText(atonementCount)
-        
         if remaining <= 3 then
             timerText:SetTextColor(1, 0.3, 0.3)
         else
@@ -140,7 +136,7 @@ end)
 -- 4. Options Window
 --------------------------------------------------
 local options = CreateFrame("Frame", "AtonementOptionsWindow", UIParent, "BackdropTemplate")
-options:SetSize(250, 320) -- Increased height for new slider
+options:SetSize(250, 380) -- Increased height to handle spacing and descriptions
 options:SetPoint("CENTER")
 options:SetFrameStrata("DIALOG")
 options:SetMovable(true)
@@ -174,7 +170,19 @@ local function CreateSlider(name, label, min, max, y, dbKey)
     s:SetObeyStepOnDrag(true)
     s:SetWidth(180)
     
-    s:SetScript("OnShow", function(self) self:SetValue(AtonementTrackerDB[dbKey]) end)
+    s:SetScript("OnShow", function(self)
+        -- Crash Prevention: Fallback for missing SavedVariables
+        local val = AtonementTrackerDB[dbKey]
+        if val == nil then
+            if dbKey == "scanInterval" then val = 0.2
+            elseif dbKey == "alpha" then val = 1.0
+            elseif dbKey == "size" then val = 40
+            else val = 22 end
+            AtonementTrackerDB[dbKey] = val
+        end
+        self:SetValue(val)
+    end)
+    
     s:SetScript("OnValueChanged", function(self, value)
         AtonementTrackerDB[dbKey] = value
         RefreshUI()
@@ -193,17 +201,18 @@ lockCb:SetScript("OnClick", function(self)
     RefreshUI()
 end)
 
+-- Spaced Sliders
 CreateSlider("SizeSl", "Icon Size", 20, 150, -100, "size")
-CreateSlider("AlphaSl", "Opacity", 0.1, 1.0, -150, "alpha")
-CreateSlider("FontSl", "Text Size", 10, 50, -200, "fontSize")
+CreateSlider("AlphaSl", "Opacity", 0.1, 1.0, -155, "alpha")
+CreateSlider("FontSl", "Text Size", 10, 50, -210, "fontSize")
 
--- Performance Slider
-local perfSl = CreateSlider("PerfSl", "Update Rate", 0.1, 1.0, -260, "scanInterval")
+-- Performance Slider + Separated Description
+local perfSl = CreateSlider("PerfSl", "Update Rate", 0.1, 1.0, -280, "scanInterval")
 local perfDesc = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-perfDesc:SetPoint("TOP", perfSl, "BOTTOM", 0, -2)
+perfDesc:SetPoint("TOP", perfSl, "BOTTOM", 0, -15)
 perfDesc:SetText("Seconds between scans. Default: 0.2\nLower is faster, higher is better CPU.")
 
 SLASH_ATONEMENT1 = "/at"
 SlashCmdList["ATONEMENT"] = function()
     if options:IsShown() then options:Hide() else options:Show() end
-end
+end  
