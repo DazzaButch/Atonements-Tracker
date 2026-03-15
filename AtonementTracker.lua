@@ -215,4 +215,4 @@ perfDesc:SetText("Seconds between scans. Default: 0.2\nLower is faster, higher i
 SLASH_ATONEMENT1 = "/at"
 SlashCmdList["ATONEMENT"] = function()
     if options:IsShown() then options:Hide() else options:Show() end
-end  
+end 
