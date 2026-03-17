@@ -2,7 +2,7 @@ local addonName, ns = ...
 local ATONEMENT_ID = 194384
 
 -- 1. Database Initialization
-Atonements-TrackerDB = Atonements-TrackerDB or {
+AtonementsTrackerDB = AtonementsTrackerDB or {
     size = 40,
     locked = false,
     alpha = 1.0,
@@ -29,12 +29,12 @@ local countText = frame:CreateFontString(nil, "OVERLAY")
 countText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 2, -2)
 
 local function RefreshUI()
-    frame:SetSize(Atonements-TrackerDB.size, Atonements-TrackerDB.size)
-    frame:SetAlpha(Atonements-TrackerDB.alpha)
-    timerText:SetFont(STANDARD_TEXT_FONT, Atonements-TrackerDB.fontSize, "THICKOUTLINE")
-    countText:SetFont(STANDARD_TEXT_FONT, Atonements-TrackerDB.fontSize * 0.7, "THICKOUTLINE")
+    frame:SetSize(AtonementsTrackerDB.size, AtonementsTrackerDB.size)
+    frame:SetAlpha(AtonementsTrackerDB.alpha)
+    timerText:SetFont(STANDARD_TEXT_FONT, AtonementsTrackerDB.fontSize, "THICKOUTLINE")
+    countText:SetFont(STANDARD_TEXT_FONT, AtonementsTrackerDB.fontSize * 0.7, "THICKOUTLINE")
     
-    if Atonements-TrackerDB.locked then
+    if AtonementsTrackerDB.locked then
         frame:EnableMouse(false)
     else
         frame:EnableMouse(true)
@@ -107,7 +107,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
         RefreshUI()
     else
         local now = GetTime()
-        if (now - lastScan) >= (Atonements-TrackerDB.scanInterval or 0.2) then
+        if (now - lastScan) >= (AtonementsTrackerDB.scanInterval or 0.2) then
             ScanAtonements()
             lastScan = now
         end
@@ -172,19 +172,19 @@ local function CreateSlider(name, label, min, max, y, dbKey)
     
     s:SetScript("OnShow", function(self)
         -- Crash Prevention: Fallback for missing SavedVariables
-        local val = Atonements-TrackerDB[dbKey]
+        local val = AtonementsTrackerDB[dbKey]
         if val == nil then
             if dbKey == "scanInterval" then val = 0.2
             elseif dbKey == "alpha" then val = 1.0
             elseif dbKey == "size" then val = 40
             else val = 22 end
-            Atonements-TrackerDB[dbKey] = val
+            AtonementsTrackerDB[dbKey] = val
         end
         self:SetValue(val)
     end)
     
     s:SetScript("OnValueChanged", function(self, value)
-        Atonements-TrackerDB[dbKey] = value
+        AtonementsTrackerDB[dbKey] = value
         RefreshUI()
         local displayVal = (step < 1) and string.format("%.1f", value) or math.floor(value)
         _G[self:GetName().."Text"]:SetText(label .. ": " .. displayVal)
@@ -195,9 +195,9 @@ end
 local lockCb = CreateFrame("CheckButton", "AtTrackerLockCB", options, "InterfaceOptionsCheckButtonTemplate")
 lockCb:SetPoint("TOPLEFT", 20, -40)
 _G[lockCb:GetName().."Text"]:SetText("Lock (Click-Through)")
-lockCb:SetScript("OnShow", function(self) self:SetChecked(Atonements-TrackerDB.locked) end)
+lockCb:SetScript("OnShow", function(self) self:SetChecked(AtonementsTrackerDB.locked) end)
 lockCb:SetScript("OnClick", function(self)
-    Atonements-TrackerDB.locked = self:GetChecked()
+    AtonementsTrackerDB.locked = self:GetChecked()
     RefreshUI()
 end)
 
