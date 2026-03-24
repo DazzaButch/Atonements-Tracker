@@ -1,219 +1,144 @@
--- Atonement Tracker (Retail 12.0.1) — Combat-log assisted detection
--- Replace your addon file with this version, /reload, then cast Atonement and test.
--- This build:
---  - Uses C_UnitAuras when available
---  - Falls back safely if UnitAura is present (some clients don't expose it)
---  - Listens to COMBAT_LOG_EVENT_UNFILTERED to detect SPELL_AURA_APPLIED/REFRESH for the atonement spellId(s)
---  - Triggers a quick rescan after combat-log detection so the icon reliably reappears
---  - Keeps options and debug prints minimal
-
 local addonName, ns = ...
 local DEFAULT_ATONEMENT_ID = 194384
-local ATONEMENT_NAME = "Atonement"
 
--- SavedVariables defaults
-AtonementTrackerDB = AtonementTrackerDB or {
+-- 1. Database Initialization & Safety Check
+local defaults = {
     size = 80,
     locked = false,
     alpha = 1.0,
     blackout = 0.6,
     fontSize = 22,
     countFontSize = 28,
+    timerColor = {1, 1, 1},
+    countColor = {1, 1, 1},
+    timerX = 0, timerY = 0,
+    countX = 0, countY = 0,
+    hideIcon = false,
     scanInterval = 0.2,
     swapPositions = false,
     iconID = DEFAULT_ATONEMENT_ID,
-    yOffset = 0,
-    xOffset = 0,
+    testMode = false,
 }
 
---------------------------------------------------
--- Helpers
---------------------------------------------------
-local function SafePrint(...)
-    if print then print("|cffffff00AtonementTracker:|r", ...) end
-end
-
-local function GetSpellTextureSafe(spellId)
-    if not spellId then return nil end
-    local ok, tex = pcall(C_Spell.GetSpellTexture, spellId)
-    if ok and tex then return tex end
-    local _, _, icon = GetSpellInfo(spellId)
-    if icon then return icon end
-    return nil
-end
-
-local function BuildUnitList()
-    local units = {"player", "target", "focus"}
-    if IsInRaid() then
-        for i = 1, GetNumGroupMembers() do units[#units+1] = "raid"..i end
-    elseif IsInGroup() then
-        local gs = GetNumGroupMembers()
-        for i = 1, math.max(0, gs - 1) do units[#units+1] = "party"..i end
-    end
-    return units
+AtonementTrackerDB = AtonementTrackerDB or {}
+for k, v in pairs(defaults) do
+    if AtonementTrackerDB[k] == nil then AtonementTrackerDB[k] = v end
 end
 
 --------------------------------------------------
--- Aura detection (C_UnitAuras preferred)
---------------------------------------------------
-local function GetAtonementAura_CUnitAuras(unit)
-    if C_UnitAuras and type(C_UnitAuras.GetAuraDataBySpellName) == "function" then
-        local ok, data = pcall(C_UnitAuras.GetAuraDataBySpellName, unit, ATONEMENT_NAME, "HELPFUL|PLAYER")
-        if ok and data and data.expirationTime and data.expirationTime > 0 then
-            return { expirationTime = data.expirationTime, spellId = data.spellId, name = data.name }
-        end
-    end
-    return nil
-end
-
-local function GetAtonementAura_FallbackUnitAura(unit)
-    if type(UnitAura) ~= "function" then return nil end
-    local targetSpellId = (AtonementTrackerDB and AtonementTrackerDB.iconID) or DEFAULT_ATONEMENT_ID
-    for i = 1, 40 do
-        local name, _, _, _, _, expirationTime, _, _, _, spellId = UnitAura(unit, i, "HELPFUL|PLAYER")
-        if not name then break end
-        if spellId and (spellId == targetSpellId or spellId == DEFAULT_ATONEMENT_ID) then
-            return { expirationTime = expirationTime, spellId = spellId, name = name }
-        end
-        if name == ATONEMENT_NAME then
-            return { expirationTime = expirationTime, spellId = spellId, name = name }
-        end
-    end
-    return nil
-end
-
-local function GetAtonementAura(unit)
-    -- Try C_UnitAuras first (Retail)
-    local data = GetAtonementAura_CUnitAuras(unit)
-    if data then return data end
-    -- Fallback to UnitAura if available
-    return GetAtonementAura_FallbackUnitAura(unit)
-end
-
---------------------------------------------------
--- UI
+-- 2. Main Tracker Icon & UI
 --------------------------------------------------
 local frame = CreateFrame("Frame", "AtonementTrackerFrame", UIParent)
 frame:SetPoint("CENTER", 0, 0)
 frame:SetMovable(true)
 frame:Hide()
-frame:SetClampedToScreen(true)
 
 local icon = frame:CreateTexture(nil, "BACKGROUND")
 icon:SetAllPoints()
 
 local overlay = frame:CreateTexture(nil, "ARTWORK")
-overlay:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
-overlay:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -1, 1)
-overlay:SetColorTexture(0, 0, 0)
+overlay:SetPoint("TOPLEFT", frame, "TOPLEFT", 2, -2)
+overlay:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+overlay:SetColorTexture(0, 0, 0) 
 
 local timerText = frame:CreateFontString(nil, "OVERLAY")
 local countText = frame:CreateFontString(nil, "OVERLAY")
 
-frame:EnableMouse(true)
-frame:SetScript("OnEnter", function(self)
-    if atonementCount and atonementCount > 0 then
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:ClearLines()
-        GameTooltip:AddLine("Atonement Tracker", 1, 1, 1)
-        GameTooltip:AddLine(("Players with %s: %d"):format(ATONEMENT_NAME, atonementCount), 1, 0.85, 0)
-        if shortestExpiration and shortestExpiration > 0 then
-            local remaining = shortestExpiration - GetTime()
-            if remaining > 0 then
-                GameTooltip:AddLine(("Shortest remaining: %.1f s"):format(remaining), 0.8, 0.8, 0.8)
-            end
-        end
-        GameTooltip:AddLine("Right-click to toggle lock; Middle-click to reset", 0.6, 0.6, 0.6)
-        GameTooltip:Show()
-    end
-end)
-frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-frame:SetScript("OnMouseUp", function(self, button)
-    if button == "RightButton" then
-        AtonementTrackerDB.locked = not AtonementTrackerDB.locked
-        RefreshUI()
-    elseif button == "MiddleButton" then
-        self:ClearAllPoints()
-        self:SetPoint("CENTER", 0, 0)
-    end
-end)
-
-frame:SetScript("OnDragStart", function(self) if not AtonementTrackerDB.locked then self:StartMoving() end end)
-frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
-
---------------------------------------------------
--- State and scanning
---------------------------------------------------
-local shortestExpiration, atonementCount = 0, 0
-local dirty = true
-local lastScanTime = 0
-local apisReady = false
-local isInitialized = false
-
 local function RefreshUI()
-    if not AtonementTrackerDB then return end
+    local tCol = AtonementTrackerDB.timerColor or {1, 1, 1}
+    local cCol = AtonementTrackerDB.countColor or {1, 1, 1}
 
-    frame:SetSize(AtonementTrackerDB.size or 80, AtonementTrackerDB.size or 80)
-    frame:SetAlpha(AtonementTrackerDB.alpha or 1.0)
-
-    local spellIdToUse = AtonementTrackerDB.iconID or DEFAULT_ATONEMENT_ID
-    local tex = GetSpellTextureSafe(spellIdToUse) or GetSpellTextureSafe(DEFAULT_ATONEMENT_ID)
-    if tex then
-        icon:SetTexture(tex)
+    frame:SetSize(AtonementTrackerDB.size, AtonementTrackerDB.size)
+    frame:SetAlpha(AtonementTrackerDB.alpha)
+    
+    if AtonementTrackerDB.hideIcon then
+        icon:SetAlpha(0)
+        overlay:SetAlpha(0)
     else
-        icon:SetTexture(nil)
-        SafePrint("failed to get texture for spellId", spellIdToUse)
+        icon:SetAlpha(1)
+        icon:SetTexture(C_Spell.GetSpellTexture(AtonementTrackerDB.iconID or DEFAULT_ATONEMENT_ID))
+        overlay:SetAlpha(AtonementTrackerDB.blackout or 0)
     end
-
-    overlay:SetAlpha(AtonementTrackerDB.blackout or 0)
-
-    timerText:SetFont(STANDARD_TEXT_FONT, AtonementTrackerDB.fontSize or 22, "OUTLINE")
-    countText:SetFont(STANDARD_TEXT_FONT, AtonementTrackerDB.countFontSize or 28, "OUTLINE")
-
-    timerText:SetJustifyH("CENTER")
-    countText:SetJustifyH("CENTER")
-
+    
+    local fontFlags = "MONOCHROME, OUTLINE, THICKOUTLINE"
+    timerText:SetFont(STANDARD_TEXT_FONT, AtonementTrackerDB.fontSize, fontFlags)
+    countText:SetFont(STANDARD_TEXT_FONT, AtonementTrackerDB.countFontSize, fontFlags)
+    
+    timerText:SetTextColor(unpack(tCol))
+    countText:SetTextColor(unpack(cCol))
+    
     timerText:ClearAllPoints()
     countText:ClearAllPoints()
 
     if AtonementTrackerDB.swapPositions then
-        countText:SetPoint("CENTER", frame, "CENTER", AtonementTrackerDB.xOffset or 0, AtonementTrackerDB.yOffset or 0)
-        timerText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+        countText:SetPoint("CENTER", frame, "CENTER", AtonementTrackerDB.countX, AtonementTrackerDB.countY)
+        timerText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", AtonementTrackerDB.timerX - 2, AtonementTrackerDB.timerY + 2)
     else
-        timerText:SetPoint("CENTER", frame, "CENTER", AtonementTrackerDB.xOffset or 0, AtonementTrackerDB.yOffset or 0)
-        countText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -2, 2)
+        timerText:SetPoint("CENTER", frame, "CENTER", AtonementTrackerDB.timerX, AtonementTrackerDB.timerY)
+        countText:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", AtonementTrackerDB.countX - 2, AtonementTrackerDB.countY + 2)
     end
+    
+    frame:EnableMouse(not AtonementTrackerDB.locked)
+    if not AtonementTrackerDB.locked then frame:RegisterForDrag("LeftButton") end
 
-    if AtonementTrackerDB.locked then
-        frame:EnableMouse(false)
-        frame:SetMovable(false)
-    else
-        frame:EnableMouse(true)
-        frame:SetMovable(true)
-        frame:RegisterForDrag("LeftButton")
+    if AtonementTrackerDB.testMode then
+        frame:Show()
+        timerText:SetText("8")
+        countText:SetText("x5")
     end
+end
 
-    isInitialized = true
+frame:SetScript("OnDragStart", frame.StartMoving)
+frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+
+--------------------------------------------------
+-- 3. Core Logic (Fixed for Taint/Secret Numbers)
+--------------------------------------------------
+local shortestExpiration, atonementCount = 0, 0
+local cachedUnits = {"player", "target", "focus"}
+local lastScan = 0
+
+local function UpdateUnitCache()
+    wipe(cachedUnits)
+    table.insert(cachedUnits, "player")
+    table.insert(cachedUnits, "target")
+    table.insert(cachedUnits, "focus")
+    
+    if IsInRaid() then
+        for i=1, GetNumGroupMembers() do 
+            local unit = "raid"..i
+            if not UnitIsUnit(unit, "player") then table.insert(cachedUnits, unit) end
+        end
+    elseif IsInGroup() then
+        for i=1, GetNumSubgroupMembers() do 
+            table.insert(cachedUnits, "party"..i)
+        end
+    end
 end
 
 local function ScanAtonements()
-    if not isInitialized or not apisReady then return end
-
+    if AtonementTrackerDB.testMode then return end
+    
     shortestExpiration, atonementCount = 0, 0
-    local units = BuildUnitList()
-    local seen = {}
-    local foundSpellIdForTexture = nil
+    local checkedGUIDs = {}
+    local spellName = C_Spell.GetSpellName(DEFAULT_ATONEMENT_ID)
 
-    for _, unit in ipairs(units) do
+    if not spellName then return end
+
+    for i = 1, #cachedUnits do
+        local unit = cachedUnits[i]
         if UnitExists(unit) and UnitIsFriend("player", unit) then
             local guid = UnitGUID(unit)
-            if guid and not seen[guid] then
-                seen[guid] = true
-                local data = GetAtonementAura(unit)
-                if data and data.expirationTime and data.expirationTime > 0 then
+            if guid and not checkedGUIDs[guid] then
+                checkedGUIDs[guid] = true
+                
+                -- Safe search using pcall to catch Blizzard UI taint errors silently
+                local success, data = pcall(function() 
+                    return C_UnitAuras.GetAuraDataBySpellName(unit, spellName, "HELPFUL") 
+                end)
+
+                if success and data and data.sourceUnit == "player" then
                     atonementCount = atonementCount + 1
-                    if data.spellId and not foundSpellIdForTexture then foundSpellIdForTexture = data.spellId end
                     if shortestExpiration == 0 or data.expirationTime < shortestExpiration then
                         shortestExpiration = data.expirationTime
                     end
@@ -221,151 +146,57 @@ local function ScanAtonements()
             end
         end
     end
-
-    if foundSpellIdForTexture then
-        local tex = GetSpellTextureSafe(foundSpellIdForTexture)
-        if tex then
-            icon:SetTexture(tex)
-            AtonementTrackerDB.iconID = foundSpellIdForTexture
-        end
-    end
-
-    if atonementCount > 0 then
-        frame:Show()
-    else
-        frame:Hide()
-    end
-
-    dirty = false
-    lastScanTime = GetTime()
+    
+    if atonementCount > 0 then frame:Show() else frame:Hide() end
 end
 
---------------------------------------------------
--- Combat log listener to catch aura application
---------------------------------------------------
-local function OnCombatLogEvent()
-    -- parse combat log
-    local timestamp, subevent, hideCaster,
-          sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
-          destGUID, destName, destFlags, destRaidFlags,
-          spellId, spellName = CombatLogGetCurrentEventInfo()
-
-    -- subevents of interest: SPELL_AURA_APPLIED, SPELL_AURA_REFRESH
-    if subevent == "SPELL_AURA_APPLIED" or subevent == "SPELL_AURA_REFRESH" then
-        -- check against configured iconID, default, and a common alternate (user reported 331475)
-        local watched = {}
-        watched[ AtonementTrackerDB.iconID or DEFAULT_ATONEMENT_ID ] = true
-        watched[ DEFAULT_ATONEMENT_ID ] = true
-        watched[331475] = true -- include the ID you reported earlier as a fallback
-
-        if spellId and watched[spellId] then
-            -- quick rescan shortly after the combat log event to let aura data populate
-            if C_Timer then
-                C_Timer.After(0.05, function()
-                    apisReady = true
-                    dirty = true
-                    ScanAtonements()
-                end)
-            else
-                apisReady = true
-                dirty = true
-                ScanAtonements()
-            end
-        end
-    end
-end
-
---------------------------------------------------
--- Event handling
---------------------------------------------------
-frame:RegisterEvent("ADDON_LOADED")
-frame:RegisterEvent("PLAYER_LOGIN")
-frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("UNIT_AURA")
 frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterEvent("PLAYER_FOCUS_CHANGED")
-frame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
-frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+frame:RegisterEvent("ADDON_LOADED")
 
-frame:SetScript("OnEvent", function(self, event, arg1, ...)
+frame:SetScript("OnEvent", function(self, event, arg1)
     if event == "ADDON_LOADED" and arg1 == addonName then
-        local defaults = {
-            size = 80,
-            locked = false,
-            alpha = 1.0,
-            blackout = 0.6,
-            fontSize = 22,
-            countFontSize = 28,
-            scanInterval = 0.2,
-            swapPositions = false,
-            iconID = DEFAULT_ATONEMENT_ID,
-            yOffset = 0,
-            xOffset = 0,
-        }
-        for k, v in pairs(defaults) do
-            if AtonementTrackerDB[k] == nil then AtonementTrackerDB[k] = v end
-        end
         RefreshUI()
-        dirty = true
-    elseif event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
-        apisReady = true
-        dirty = true
+        UpdateUnitCache()
+    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
+        UpdateUnitCache()
         ScanAtonements()
-    elseif event == "UNIT_AURA" then
-        local unit = arg1
-        if unit and (unit == "player" or unit == "target" or unit == "focus" or string.match(unit, "^party") or string.match(unit, "^raid")) then
-            dirty = true
-        end
-    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        local unit = arg1
-        if unit and (unit == "player" or unit == "target" or unit == "focus" or string.match(unit, "^party") or string.match(unit, "^raid")) then
-            -- short delay to allow aura application
-            if C_Timer then C_Timer.After(0.05, function() dirty = true; ScanAtonements() end) end
-        end
-    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        OnCombatLogEvent()
     else
-        dirty = true
+        ScanAtonements()
     end
 end)
 
 frame:SetScript("OnUpdate", function(self, elapsed)
-    if not isInitialized then isInitialized = true end
-    if not apisReady then return end
-
-    local interval = AtonementTrackerDB.scanInterval or 0.2
-    if dirty and (GetTime() - lastScanTime >= interval) then
+    if AtonementTrackerDB.testMode then return end
+    
+    lastScan = lastScan + elapsed
+    if lastScan >= (AtonementTrackerDB.scanInterval or 0.2) then
         ScanAtonements()
+        lastScan = 0
     end
 
-    if atonementCount and atonementCount > 0 then
+    if atonementCount > 0 then
         local remaining = shortestExpiration - GetTime()
         if remaining > 0 then
             timerText:SetText(string.format("%.0f", remaining))
             countText:SetText("x" .. atonementCount)
-            local r, g, b = 1, 1, 1
-            if remaining > 6 then r, g, b = 0.2, 1, 0.2
-            elseif remaining > 3 then r, g, b = 1, 1, 0.2
-            else r, g, b = 1, 0.4, 0.4 end
-            timerText:SetTextColor(r, g, b)
-            countText:SetTextColor(1, 1, 1)
+            -- Apply user color setting without hardcoded red overrides
+            timerText:SetTextColor(unpack(AtonementTrackerDB.timerColor or {1,1,1}))
         else
             timerText:SetText("")
-            countText:SetText("x" .. atonementCount)
-            timerText:SetTextColor(1, 1, 1)
+            frame:Hide()
         end
-    else
-        timerText:SetText("")
-        countText:SetText("")
     end
 end)
 
 --------------------------------------------------
--- Options window and slash (kept minimal)
+-- 4. Options Window
 --------------------------------------------------
 local options = CreateFrame("Frame", "AtonementOptionsWindow", UIParent, "BackdropTemplate")
-options:SetSize(250, 620)
+options:SetSize(260, 720) 
 options:SetPoint("CENTER")
 options:SetFrameStrata("DIALOG")
 options:SetMovable(true)
@@ -383,109 +214,114 @@ options:SetBackdrop({
 })
 options:SetBackdropColor(0, 0, 0, 0.9)
 
-local function CreateSlider(name, label, min, max, y, dbKey, step)
-    local s = CreateFrame("Slider", "AtTracker"..name, options, "OptionsSliderTemplate")
-    s:SetPoint("TOP", 0, y)
-    s:SetMinMaxValues(min, max)
-    step = step or ((dbKey == "alpha" or dbKey == "scanInterval" or dbKey == "blackout") and 0.1 or 1)
-    s:SetValueStep(step)
-    s:SetObeyStepOnDrag(true)
-    s:SetWidth(180)
-    s:SetScript("OnShow", function(self)
-        local v = AtonementTrackerDB[dbKey]
-        if v == nil then v = min end
-        self:SetValue(v)
-        local display = (step < 1) and string.format("%.1f", v) or tostring(math.floor(v))
-        _G[self:GetName().."Text"]:SetText(label .. ": " .. display)
-    end)
-    s:SetScript("OnValueChanged", function(self, value)
-        if step < 1 then value = tonumber(string.format("%.1f", value)) else value = math.floor(value + 0.5) end
-        AtonementTrackerDB[dbKey] = value
-        RefreshUI()
-        _G[self:GetName().."Text"]:SetText(label .. ": " .. ((step < 1) and string.format("%.1f", value) or tostring(value)))
-    end)
-    return s
-end
-
 local title = options:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 title:SetPoint("TOP", 0, -12)
-title:SetText("Atonement Tracker")
+title:SetText("Atonement Tracker Settings")
 
 local close = CreateFrame("Button", nil, options, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", -2, -2)
 
-local lockCb = CreateFrame("CheckButton", "AtTrackerLockCB", options, "InterfaceOptionsCheckButtonTemplate")
-lockCb:SetPoint("TOPLEFT", 30, -40)
-_G[lockCb:GetName().."Text"]:SetText("Lock (Click-Through)")
-lockCb:SetScript("OnShow", function(self) self:SetChecked(AtonementTrackerDB.locked) end)
-lockCb:SetScript("OnClick", function(self) AtonementTrackerDB.locked = self:GetChecked() RefreshUI() end)
+local function CreateSlider(name, label, min, max, y, dbKey, tooltip)
+    local s = CreateFrame("Slider", "AtTracker"..name, options, "OptionsSliderTemplate")
+    s:SetPoint("TOP", 0, y)
+    s:SetMinMaxValues(min, max)
+    local step = (dbKey:find("alpha") or dbKey:find("scan") or dbKey:find("blackout")) and 0.1 or 1
+    s:SetValueStep(step)
+    s:SetObeyStepOnDrag(true)
+    s:SetWidth(180)
+    s:SetScript("OnShow", function(self) self:SetValue(AtonementTrackerDB[dbKey] or 0) end)
+    s:SetScript("OnValueChanged", function(self, value)
+        AtonementTrackerDB[dbKey] = value
+        RefreshUI()
+        _G[self:GetName().."Text"]:SetText(label .. ": " .. (step < 1 and string.format("%.1f", value) or math.floor(value)))
+    end)
+    s:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(label, 1, 1, 1)
+        GameTooltip:AddLine(tooltip, nil, nil, nil, true)
+        GameTooltip:Show()
+    end)
+    s:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return s
+end
 
-local swapCb = CreateFrame("CheckButton", "AtTrackerSwapCB", options, "InterfaceOptionsCheckButtonTemplate")
-swapCb:SetPoint("TOPLEFT", 30, -65)
-_G[swapCb:GetName().."Text"]:SetText("Swap Timer/Count")
-swapCb:SetScript("OnShow", function(self) self:SetChecked(AtonementTrackerDB.swapPositions) end)
-swapCb:SetScript("OnClick", function(self) AtonementTrackerDB.swapPositions = self:GetChecked() RefreshUI() end)
+local function CreateCB(name, label, y, dbKey, tooltip)
+    local cb = CreateFrame("CheckButton", "AtTracker"..name.."CB", options, "InterfaceOptionsCheckButtonTemplate")
+    cb:SetPoint("TOPLEFT", 30, y)
+    _G[cb:GetName().."Text"]:SetText(label)
+    cb:SetScript("OnShow", function(self) self:SetChecked(AtonementTrackerDB[dbKey]) end)
+    cb:SetScript("OnClick", function(self) AtonementTrackerDB[dbKey] = self:GetChecked() RefreshUI() end)
+    cb:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(label, 1, 1, 1)
+        GameTooltip:AddLine(tooltip, nil, nil, nil, true)
+        GameTooltip:Show()
+    end)
+    cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return cb
+end
 
-CreateSlider("SizeSl", "Icon Size", 20, 200, -110, "size", 1)
-CreateSlider("AlphaSl", "Opacity", 0.1, 1.0, -155, "alpha", 0.1)
-CreateSlider("DarkSl", "Dark Overlay", 0.0, 1.0, -200, "blackout", 0.1)
-CreateSlider("TimerFontSl", "Timer Font Size", 10, 80, -245, "fontSize", 1)
-CreateSlider("CountFontSl", "X Amount Font Size", 10, 80, -290, "countFontSize", 1)
-CreateSlider("VertSl", "Center Text Y Offset", -50, 50, -335, "yOffset", 1)
-CreateSlider("HorizSl", "Center Text X Offset", -50, 50, -380, "xOffset", 1)
+CreateCB("Test", "Test Mode", -40, "testMode", "Shows the frame with dummy data for easy adjustment.")
+CreateCB("Lock", "Lock Frame", -65, "locked", "Prevents dragging and enables click-through.")
+CreateCB("Swap", "Swap Positions", -90, "swapPositions", "Switches the placement of the timer and the count.")
+CreateCB("Hide", "Hide Icon (Text Only)", -115, "hideIcon", "Hides the spell icon and dark background.")
 
-local ebLabel = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-ebLabel:SetPoint("TOPLEFT", 35, -435)
-ebLabel:SetText("Custom Spell ID Code:")
+CreateSlider("SizeSl", "Icon Size", 20, 140, -170, "size", "Overall scale of the tracker frame.")
+CreateSlider("AlphaSl", "Opacity", 0.1, 1.0, -210, "alpha", "Sets the transparency of the entire addon.")
+CreateSlider("DarkSl", "Overlay Dark", 0.0, 1.0, -250, "blackout", "Adjusts the darkness of the icon overlay.")
+
+CreateSlider("TFontSl", "Timer - Font Size", 10, 50, -300, "fontSize", "Size of the countdown number.")
+CreateSlider("TXSl", "Timer - X Offset", -100, 100, -340, "timerX", "Nudge the timer left or right.")
+CreateSlider("TYSl", "Timer - Y Offset", -100, 100, -380, "timerY", "Nudge the timer up or down.")
+
+CreateSlider("CFontSl", "X Count - Font Size", 10, 50, -430, "countFontSize", "Size of the 'xAmount' text.")
+CreateSlider("CXSl", "X Count - X Offset", -100, 100, -470, "countX", "Nudge the count left or right.")
+CreateSlider("CYSl", "X Count - Y Offset", -100, 100, -510, "countY", "Nudge the count up or down.")
+
+local function OpenColorPicker(dbKey)
+    local r, g, b = unpack(AtonementTrackerDB[dbKey] or {1,1,1})
+    ColorPickerFrame:SetupColorPickerAndShow({
+        swatchFunc = function()
+            local nr, ng, nb = ColorPickerFrame:GetColorRGB()
+            AtonementTrackerDB[dbKey] = {nr, ng, nb}
+            RefreshUI()
+        end,
+        r = r, g = g, b = b,
+        hasAlpha = false,
+    })
+end
+
+local tColBtn = CreateFrame("Button", nil, options, "UIPanelButtonTemplate")
+tColBtn:SetSize(100, 22)
+tColBtn:SetPoint("TOPLEFT", 30, -550)
+tColBtn:SetText("Timer Color")
+tColBtn:SetScript("OnClick", function() OpenColorPicker("timerColor") end)
+
+local cColBtn = CreateFrame("Button", nil, options, "UIPanelButtonTemplate")
+cColBtn:SetSize(100, 22)
+cColBtn:SetPoint("TOPRIGHT", -30, -550)
+cColBtn:SetText("X Count Color")
+cColBtn:SetScript("OnClick", function() OpenColorPicker("countColor") end)
+
+local ebLabel = options:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+ebLabel:SetPoint("TOPLEFT", 35, -590)
+ebLabel:SetText("Custom Icon (Spell ID):")
 
 local eb = CreateFrame("EditBox", "AtTrackerIconEB", options, "InputBoxTemplate")
 eb:SetSize(180, 30)
-eb:SetPoint("TOP", 5, -440)
+eb:SetPoint("TOP", 5, -605)
 eb:SetAutoFocus(false)
 eb:SetNumeric(true)
-
-eb:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Custom Spell Icon", 1, 1, 1)
-    GameTooltip:AddLine("Enter a Spell ID (e.g., 194384) to change the icon.", 1, 0.8, 0, true)
-    GameTooltip:AddLine("Press Enter to save.", 0, 1, 0)
-    GameTooltip:Show()
-end)
-eb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-eb:SetScript("OnShow", function(self) self:SetText(AtonementTrackerDB.iconID or DEFAULT_ATONEMENT_ID) end)
+eb:SetScript("OnShow", function(self) self:SetText(AtonementTrackerDB.iconID or 194384) end)
 eb:SetScript("OnEnterPressed", function(self)
     local val = tonumber(self:GetText())
-    if val then
-        AtonementTrackerDB.iconID = val
-        RefreshUI()
-    end
+    if val then AtonementTrackerDB.iconID = val RefreshUI() end
     self:ClearFocus()
 end)
 
-CreateSlider("PerfSl", "Update Rate", 0.1, 1.0, -510, "scanInterval", 0.1)
-
-local reset = CreateFrame("Button", nil, options, "UIPanelButtonTemplate")
-reset:SetSize(120, 25)
-reset:SetPoint("BOTTOM", 0, 15)
-reset:SetText("Reset Position")
-reset:SetScript("OnClick", function()
-    AtonementTrackerFrame:ClearAllPoints()
-    AtonementTrackerFrame:SetPoint("CENTER", 0, 0)
-end)
+CreateSlider("PerfSl", "Update Rate", 0.1, 1.0, -665, "scanInterval", "How often to scan for auras. Lower is more responsive but uses more CPU.")
 
 SLASH_ATONEMENT1 = "/at"
-SlashCmdList["ATONEMENT"] = function(msg)
-    if msg and msg:lower():match("^test") then
-        SafePrint("Manual test scan triggered")
-        apisReady = true
-        dirty = true
-        ScanAtonements()
-        frame:Show()
-        return
-    end
+SlashCmdList["ATONEMENT"] = function()
     if options:IsShown() then options:Hide() else options:Show() end
 end
-
--- initial refresh
-if C_Timer then C_Timer.After(0.5, function() RefreshUI() end) else RefreshUI() end
