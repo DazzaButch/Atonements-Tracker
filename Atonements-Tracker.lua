@@ -147,7 +147,12 @@ local function ScanAtonements()
         end
     end
     
-    if atonementCount > 0 then frame:Show() else frame:Hide() end
+    if atonementCount > 0 then
+    frame:Show()
+else
+    if not InCombatLockdown() then
+        frame:Hide()
+    end
 end
 
 frame:RegisterEvent("UNIT_AURA")
