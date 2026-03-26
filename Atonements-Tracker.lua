@@ -147,7 +147,7 @@ local function ScanAtonements()
         end
     end
     
-    if atonementCount > 0 then
+if atonementCount > 0 then
         frame:Show()
     else
         if not InCombatLockdown() then
